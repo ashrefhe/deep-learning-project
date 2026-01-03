@@ -1,0 +1,722 @@
+"""
+SPAM DETECTOR APPLICATION
+Application Streamlit complète pour la détection de spam
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import pickle
+import string
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
+from wordcloud import WordCloud
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from nltk.stem import PorterStemmer, WordNetLemmatizer
+import nltk
+import time
+import io
+
+# Configuration de la page
+st.set_page_config(
+    page_title="Spam Detector",
+    page_icon="🔒",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Télécharger les ressources NLTK
+@st.cache_resource
+def download_nltk_resources():
+    try:
+        nltk.download('wordnet', quiet=True)
+        nltk.download('omw-1.4', quiet=True)
+    except:
+        pass
+
+download_nltk_resources()
+
+# ==================== STYLE CSS ====================
+st.markdown("""
+    <style>
+    .main {
+        background-color: #f5f7fa;
+    }
+    .stAlert {
+        padding: 1rem;
+        border-radius: 0.5rem;
+    }
+    .spam-box {
+        background-color: #fee;
+        border-left: 5px solid #f44;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+    .ham-box {
+        background-color: #efe;
+        border-left: 5px solid #4f4;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+    .metric-card {
+        background-color: white;
+        padding: 1.5rem;
+        border-radius: 0.5rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    h1, h2, h3 {
+        color: #2c3e50;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# ==================== FONCTIONS UTILITAIRES ====================
+
+@st.cache_data
+def load_data():
+    """Charge les données"""
+    try:
+        df = pd.read_csv("spam.csv", sep=";", encoding="latin-1")
+        df.rename(columns={0: 'v1', 1: 'v2'}, inplace=True)
+        df = df[['v1', 'v2']]
+        df['v1'] = df['v1'].str.strip().str.replace('"""', '', regex=False).str.replace('"', '', regex=False).str.lower()
+        return df
+    except:
+        # Données d'exemple si le fichier n'existe pas
+        return pd.DataFrame({
+            'v1': ['ham', 'spam', 'ham', 'spam'] * 25,
+            'v2': ['Hello how are you', 'Win money now!!!', 'Meeting at 3pm', 'Congratulations you won'] * 25
+        })
+
+def preprocess_text(text, method='stemming'):
+    """Prétraite un texte"""
+    stop_words = set([
+        'i','me','my','myself','we','our','ours','ourselves','you','your','yours',
+        'yourself','yourselves','he','him','his','himself','she','her','hers','herself',
+        'it','its','itself','they','them','their','theirs','themselves','what','which',
+        'who','whom','this','that','these','those','am','is','are','was','were','be','been',
+        'being','have','has','had','having','do','does','did','doing','a','an','the','and',
+        'but','if','or','because','as','until','while','of','at','by','for','with','about',
+        'against','between','into','through','during','before','after','above','below','to',
+        'from','up','down','in','out','on','off','over','under','again','further','then',
+        'once','here','there','when','where','why','how','all','any','both','each','few',
+        'more','most','other','some','such','no','nor','not','only','own','same','so','than',
+        'too','very','s','t','can','will','just','don','should','now'
+    ])
+    
+    # Lowercase
+    text = text.lower()
+    
+    # Remove punctuation
+    text = text.translate(str.maketrans('', '', string.punctuation))
+    
+    # Tokenization
+    tokens = text.split()
+    
+    # Remove stopwords
+    tokens = [w for w in tokens if w not in stop_words]
+    
+    # Stemming ou Lemmatization
+    if method == 'stemming':
+        stemmer = PorterStemmer()
+        tokens = [stemmer.stem(w) for w in tokens]
+    else:
+        lemmatizer = WordNetLemmatizer()
+        tokens = [lemmatizer.lemmatize(w) for w in tokens]
+    
+    return ' '.join(tokens)
+
+def train_model(df, preprocess_method='stemming', vectorizer_type='tfidf', model_type='naive_bayes'):
+    """Entraîne un modèle"""
+    # Preprocessing
+    df['processed'] = df['v2'].apply(lambda x: preprocess_text(x, preprocess_method))
+    
+    # Vectorization
+    if vectorizer_type == 'tfidf':
+        vectorizer = TfidfVectorizer(max_features=3000, min_df=2, max_df=0.8)
+    else:
+        vectorizer = CountVectorizer(max_features=3000, min_df=2, max_df=0.8)
+    
+    X = vectorizer.fit_transform(df['processed'])
+    y = (df['v1'] == 'spam').astype(int)
+    
+    # Model
+    if model_type == 'naive_bayes':
+        model = MultinomialNB(alpha=1.0)
+    elif model_type == 'logistic_regression':
+        model = LogisticRegression(C=10, max_iter=1000, random_state=42)
+    elif model_type == 'svm':
+        model = SVC(C=10, kernel='linear', probability=True, random_state=42)
+    else:
+        model = RandomForestClassifier(n_estimators=100, max_depth=20, random_state=42)
+    
+    model.fit(X, y)
+    
+    return model, vectorizer
+
+def predict_message(text, model, vectorizer, preprocess_method='stemming'):
+    """Prédit si un message est spam ou ham"""
+    processed = preprocess_text(text, preprocess_method)
+    vectorized = vectorizer.transform([processed])
+    prediction = model.predict(vectorized)[0]
+    probability = model.predict_proba(vectorized)[0]
+    
+    return prediction, probability
+
+# ==================== SESSION STATE ====================
+
+if 'model' not in st.session_state:
+    st.session_state.model = None
+if 'vectorizer' not in st.session_state:
+    st.session_state.vectorizer = None
+if 'df' not in st.session_state:
+    st.session_state.df = load_data()
+if 'preprocess_method' not in st.session_state:
+    st.session_state.preprocess_method = 'stemming'
+if 'vectorizer_type' not in st.session_state:
+    st.session_state.vectorizer_type = 'tfidf'
+if 'model_type' not in st.session_state:
+    st.session_state.model_type = 'naive_bayes'
+
+# ==================== SIDEBAR ====================
+
+with st.sidebar:
+    st.image("https://img.icons8.com/fluency/96/000000/spam.png", width=80)
+    st.title("🔒 Spam Detector")
+    st.markdown("---")
+    
+    page = st.radio(
+        "Navigation",
+        ["🏠 Dashboard", "🔮 Prédiction", "📁 Batch", "🔍 Explorer", "⚙️ Configuration"],
+        label_visibility="collapsed"
+    )
+    
+    st.markdown("---")
+    st.markdown("### 📊 Statistiques")
+    if st.session_state.df is not None:
+        total = len(st.session_state.df)
+        spam_count = sum(st.session_state.df['v1'] == 'spam')
+        ham_count = total - spam_count
+        
+        st.metric("Total messages", total)
+        st.metric("🔴 Spam", spam_count, f"{spam_count/total*100:.1f}%")
+        st.metric("🟢 Ham", ham_count, f"{ham_count/total*100:.1f}%")
+
+# ==================== PAGE: DASHBOARD ====================
+
+if page == "🏠 Dashboard":
+    st.title("🏠 Dashboard - Spam Detector")
+    st.markdown("Bienvenue dans l'application de détection de spam utilisant le Machine Learning")
+    
+    df = st.session_state.df
+    
+    # Métriques
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.metric("📧 Total Messages", len(df))
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        spam_count = sum(df['v1'] == 'spam')
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.metric("🔴 Spam", spam_count, f"{spam_count/len(df)*100:.1f}%")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col3:
+        ham_count = sum(df['v1'] == 'ham')
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.metric("🟢 Ham", ham_count, f"{ham_count/len(df)*100:.1f}%")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col4:
+        avg_length = df['v2'].str.len().mean()
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.metric("📏 Longueur moy.", f"{avg_length:.0f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # Graphiques
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("📊 Distribution des classes")
+        fig = px.pie(
+            values=[ham_count, spam_count],
+            names=['Ham', 'Spam'],
+            color=['Ham', 'Spam'],
+            color_discrete_map={'Ham': '#4CAF50', 'Spam': '#F44336'},
+            hole=0.4
+        )
+        fig.update_layout(height=400)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        st.subheader("📏 Distribution longueur messages")
+        df['length'] = df['v2'].str.len()
+        fig = px.histogram(
+            df, 
+            x='length', 
+            color='v1',
+            nbins=50,
+            color_discrete_map={'ham': '#4CAF50', 'spam': '#F44336'},
+            labels={'length': 'Longueur du message', 'count': 'Nombre'}
+        )
+        fig.update_layout(height=400)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # Exemples de messages
+    st.subheader("📝 Exemples de messages")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("##### 🟢 Exemples de HAM")
+        ham_samples = df[df['v1'] == 'ham']['v2'].sample(min(5, len(df[df['v1'] == 'ham'])))
+        for i, msg in enumerate(ham_samples, 1):
+            st.info(f"{i}. {msg[:100]}...")
+    
+    with col2:
+        st.markdown("##### 🔴 Exemples de SPAM")
+        spam_samples = df[df['v1'] == 'spam']['v2'].sample(min(5, len(df[df['v1'] == 'spam'])))
+        for i, msg in enumerate(spam_samples, 1):
+            st.error(f"{i}. {msg[:100]}...")
+
+# ==================== PAGE: PRÉDICTION ====================
+
+elif page == "🔮 Prédiction":
+    st.title("🔮 Prédiction en temps réel")
+    st.markdown("Entrez un message pour vérifier s'il s'agit d'un spam ou non")
+    
+    # Vérifier si le modèle est entraîné
+    if st.session_state.model is None:
+        st.warning("⚠️ Aucun modèle entraîné. Allez dans Configuration pour entraîner un modèle.")
+        if st.button("🚀 Entraîner un modèle maintenant"):
+            with st.spinner("Entraînement en cours..."):
+                model, vectorizer = train_model(
+                    st.session_state.df,
+                    st.session_state.preprocess_method,
+                    st.session_state.vectorizer_type,
+                    st.session_state.model_type
+                )
+                st.session_state.model = model
+                st.session_state.vectorizer = vectorizer
+                st.success("✅ Modèle entraîné avec succès!")
+        
+        st.balloons()
+        
+        # Afficher les paramètres utilisés
+        st.markdown("### ✅ Configuration actuelle")
+        
+        config_df = pd.DataFrame({
+            'Paramètre': ['Preprocessing', 'Vectorisation', 'Modèle'],
+            'Valeur': [preprocess_method, vectorizer_type, model_type]
+        })
+        
+        st.table(config_df)
+        
+        st.info("💡 Vous pouvez maintenant utiliser la page Prédiction pour tester le modèle!")
+    
+    # Afficher la configuration actuelle
+    if st.session_state.model is not None:
+        st.markdown("---")
+        st.markdown("### 📋 Configuration actuelle")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Preprocessing", st.session_state.preprocess_method.title())
+        with col2:
+            st.metric("Vectorisation", st.session_state.vectorizer_type.upper())
+        with col3:
+            st.metric("Modèle", st.session_state.model_type.replace('_', ' ').title())
+
+# ==================== FOOTER ====================
+
+st.markdown("---")
+st.markdown("""
+    <div style='text-align: center; color: #666; padding: 2rem;'>
+        <p>🔒 <b>Spam Detector</b> - Application de détection de spam avec Machine Learning</p>
+        <p>Développé avec ❤️ using Streamlit | © 2025</p>
+    </div>
+""", unsafe_allow_html=True) Modèle entraîné avec succès!")
+                st.rerun()
+    else:
+        # Zone de texte
+        st.markdown("### 📝 Entrez votre message")
+        user_input = st.text_area(
+            "Message à analyser",
+            height=150,
+            placeholder="Ex: Congratulations! You won $1000. Click here to claim your prize!"
+        )
+        
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            predict_button = st.button("🔮 Analyser", type="primary", use_container_width=True)
+        with col2:
+            clear_button = st.button("🗑️ Effacer", use_container_width=True)
+        
+        if clear_button:
+            st.rerun()
+        
+        if predict_button and user_input:
+            with st.spinner("Analyse en cours..."):
+                time.sleep(0.5)  # Animation
+                
+                prediction, probability = predict_message(
+                    user_input,
+                    st.session_state.model,
+                    st.session_state.vectorizer,
+                    st.session_state.preprocess_method
+                )
+                
+                st.markdown("---")
+                st.markdown("### 📊 Résultat de l'analyse")
+                
+                if prediction == 1:
+                    # SPAM
+                    spam_prob = probability[1] * 100
+                    st.markdown(f"""
+                    <div class="spam-box">
+                        <h2>🚨 SPAM DÉTECTÉ !</h2>
+                        <p style="font-size: 1.2rem;">Confiance : <b>{spam_prob:.2f}%</b></p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Barre de progression
+                    st.progress(probability[1])
+                    
+                    # Probabilités détaillées
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("🔴 Probabilité SPAM", f"{probability[1]*100:.2f}%")
+                    with col2:
+                        st.metric("🟢 Probabilité HAM", f"{probability[0]*100:.2f}%")
+                    
+                else:
+                    # HAM
+                    ham_prob = probability[0] * 100
+                    st.markdown(f"""
+                    <div class="ham-box">
+                        <h2>✅ MESSAGE LÉGITIME (HAM)</h2>
+                        <p style="font-size: 1.2rem;">Confiance : <b>{ham_prob:.2f}%</b></p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Barre de progression
+                    st.progress(probability[0])
+                    
+                    # Probabilités détaillées
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("🟢 Probabilité HAM", f"{probability[0]*100:.2f}%")
+                    with col2:
+                        st.metric("🔴 Probabilité SPAM", f"{probability[1]*100:.2f}%")
+                
+                # Détails du preprocessing
+                with st.expander("🔍 Voir les détails du preprocessing"):
+                    processed = preprocess_text(user_input, st.session_state.preprocess_method)
+                    st.markdown("**Message original:**")
+                    st.code(user_input)
+                    st.markdown("**Message après preprocessing:**")
+                    st.code(processed)
+        
+        # Exemples à tester
+        st.markdown("---")
+        st.markdown("### 💡 Exemples à tester")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Messages HAM:**")
+            if st.button("📧 Hey, meeting at 3pm tomorrow"):
+                st.session_state.test_message = "Hey, meeting at 3pm tomorrow"
+                st.rerun()
+            if st.button("📱 Can you pick up milk on your way home?"):
+                st.session_state.test_message = "Can you pick up milk on your way home?"
+                st.rerun()
+        
+        with col2:
+            st.markdown("**Messages SPAM:**")
+            if st.button("💰 Congratulations! You won $10000. Click here now!"):
+                st.session_state.test_message = "Congratulations! You won $10000. Click here now!"
+                st.rerun()
+            if st.button("🎁 FREE iPhone! Limited offer. Act now!!!"):
+                st.session_state.test_message = "FREE iPhone! Limited offer. Act now!!!"
+                st.rerun()
+
+# ==================== PAGE: BATCH ====================
+
+elif page == "📁 Batch":
+    st.title("📁 Prédiction par lot")
+    st.markdown("Uploadez un fichier CSV pour analyser plusieurs messages en une fois")
+    
+    if st.session_state.model is None:
+        st.warning("⚠️ Aucun modèle entraîné. Allez dans Configuration pour entraîner un modèle.")
+    else:
+        # Upload de fichier
+        uploaded_file = st.file_uploader("Choisissez un fichier CSV", type=['csv'])
+        
+        if uploaded_file is not None:
+            try:
+                # Lire le fichier
+                batch_df = pd.read_csv(uploaded_file)
+                
+                st.success(f"✅ Fichier chargé: {len(batch_df)} messages")
+                
+                # Afficher un aperçu
+                st.markdown("### 👀 Aperçu des données")
+                st.dataframe(batch_df.head())
+                
+                # Sélectionner la colonne à analyser
+                text_column = st.selectbox("Sélectionnez la colonne contenant les messages", batch_df.columns)
+                
+                if st.button("🔮 Analyser tous les messages", type="primary"):
+                    with st.spinner("Analyse en cours..."):
+                        progress_bar = st.progress(0)
+                        
+                        predictions = []
+                        probabilities_spam = []
+                        probabilities_ham = []
+                        
+                        for i, text in enumerate(batch_df[text_column]):
+                            pred, prob = predict_message(
+                                str(text),
+                                st.session_state.model,
+                                st.session_state.vectorizer,
+                                st.session_state.preprocess_method
+                            )
+                            predictions.append('spam' if pred == 1 else 'ham')
+                            probabilities_spam.append(prob[1])
+                            probabilities_ham.append(prob[0])
+                            
+                            progress_bar.progress((i + 1) / len(batch_df))
+                        
+                        # Ajouter les résultats
+                        batch_df['Prediction'] = predictions
+                        batch_df['Prob_Spam'] = probabilities_spam
+                        batch_df['Prob_Ham'] = probabilities_ham
+                        
+                        st.success("✅ Analyse terminée!")
+                        
+                        # Statistiques
+                        st.markdown("### 📊 Résultats")
+                        col1, col2, col3 = st.columns(3)
+                        
+                        spam_count = sum(batch_df['Prediction'] == 'spam')
+                        ham_count = sum(batch_df['Prediction'] == 'ham')
+                        
+                        with col1:
+                            st.metric("Total analysés", len(batch_df))
+                        with col2:
+                            st.metric("🔴 SPAM détectés", spam_count, f"{spam_count/len(batch_df)*100:.1f}%")
+                        with col3:
+                            st.metric("🟢 HAM détectés", ham_count, f"{ham_count/len(batch_df)*100:.1f}%")
+                        
+                        # Afficher les résultats
+                        st.markdown("### 📋 Résultats détaillés")
+                        st.dataframe(batch_df)
+                        
+                        # Télécharger les résultats
+                        csv = batch_df.to_csv(index=False)
+                        st.download_button(
+                            label="💾 Télécharger les résultats",
+                            data=csv,
+                            file_name="spam_predictions.csv",
+                            mime="text/csv"
+                        )
+                        
+            except Exception as e:
+                st.error(f"❌ Erreur lors de la lecture du fichier: {e}")
+
+# ==================== PAGE: EXPLORER ====================
+
+elif page == "🔍 Explorer":
+    st.title("🔍 Exploration des données")
+    
+    df = st.session_state.df
+    
+    tab1, tab2, tab3 = st.tabs(["☁️ Word Clouds", "📊 Statistiques", "🔤 Exemples"])
+    
+    with tab1:
+        st.markdown("### ☁️ Nuages de mots")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### 🟢 HAM Messages")
+            ham_text = ' '.join(df[df['v1'] == 'ham']['v2'].astype(str))
+            
+            if len(ham_text) > 0:
+                wordcloud_ham = WordCloud(
+                    width=400, 
+                    height=300, 
+                    background_color='white',
+                    colormap='Greens'
+                ).generate(ham_text)
+                
+                fig, ax = plt.subplots(figsize=(8, 6))
+                ax.imshow(wordcloud_ham, interpolation='bilinear')
+                ax.axis('off')
+                st.pyplot(fig)
+        
+        with col2:
+            st.markdown("#### 🔴 SPAM Messages")
+            spam_text = ' '.join(df[df['v1'] == 'spam']['v2'].astype(str))
+            
+            if len(spam_text) > 0:
+                wordcloud_spam = WordCloud(
+                    width=400, 
+                    height=300, 
+                    background_color='white',
+                    colormap='Reds'
+                ).generate(spam_text)
+                
+                fig, ax = plt.subplots(figsize=(8, 6))
+                ax.imshow(wordcloud_spam, interpolation='bilinear')
+                ax.axis('off')
+                st.pyplot(fig)
+    
+    with tab2:
+        st.markdown("### 📊 Statistiques détaillées")
+        
+        # Longueur des messages
+        df['length'] = df['v2'].str.len()
+        df['word_count'] = df['v2'].str.split().str.len()
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### Longueur moyenne par type")
+            length_stats = df.groupby('v1')['length'].agg(['mean', 'median', 'std'])
+            st.dataframe(length_stats)
+            
+            fig = px.box(df, x='v1', y='length', color='v1',
+                        color_discrete_map={'ham': '#4CAF50', 'spam': '#F44336'},
+                        labels={'v1': 'Type', 'length': 'Longueur'})
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.markdown("#### Nombre de mots moyen par type")
+            word_stats = df.groupby('v1')['word_count'].agg(['mean', 'median', 'std'])
+            st.dataframe(word_stats)
+            
+            fig = px.box(df, x='v1', y='word_count', color='v1',
+                        color_discrete_map={'ham': '#4CAF50', 'spam': '#F44336'},
+                        labels={'v1': 'Type', 'word_count': 'Nombre de mots'})
+            st.plotly_chart(fig, use_container_width=True)
+    
+    with tab3:
+        st.markdown("### 🔤 Exemples de messages")
+        
+        num_examples = st.slider("Nombre d'exemples à afficher", 5, 20, 10)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### 🟢 Messages HAM")
+            ham_samples = df[df['v1'] == 'ham']['v2'].sample(min(num_examples, len(df[df['v1'] == 'ham'])))
+            for i, msg in enumerate(ham_samples, 1):
+                with st.expander(f"Message {i}"):
+                    st.write(msg)
+        
+        with col2:
+            st.markdown("#### 🔴 Messages SPAM")
+            spam_samples = df[df['v1'] == 'spam']['v2'].sample(min(num_examples, len(df[df['v1'] == 'spam'])))
+            for i, msg in enumerate(spam_samples, 1):
+                with st.expander(f"Message {i}"):
+                    st.write(msg)
+
+# ==================== PAGE: CONFIGURATION ====================
+
+elif page == "⚙️ Configuration":
+    st.title("⚙️ Configuration du modèle")
+    st.markdown("Configurez les paramètres de preprocessing et d'entraînement")
+    
+    st.markdown("### 🔧 Paramètres de preprocessing")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        preprocess_method = st.selectbox(
+            "Méthode de normalisation",
+            ['stemming', 'lemmatization'],
+            index=0 if st.session_state.preprocess_method == 'stemming' else 1
+        )
+        st.info("**Stemming**: Plus rapide, mais moins précis\n\n**Lemmatization**: Plus précis, mais plus lent")
+    
+    with col2:
+        vectorizer_type = st.selectbox(
+            "Type de vectorisation",
+            ['tfidf', 'bow'],
+            index=0 if st.session_state.vectorizer_type == 'tfidf' else 1
+        )
+        st.info("**TF-IDF**: Pondère l'importance des mots\n\n**BoW**: Compte simple des occurrences")
+    
+    st.markdown("---")
+    st.markdown("### 🤖 Choix du modèle")
+    
+    model_type = st.selectbox(
+        "Algorithme de Machine Learning",
+        ['naive_bayes', 'logistic_regression', 'svm', 'random_forest'],
+        format_func=lambda x: {
+            'naive_bayes': 'Naive Bayes (Rapide)',
+            'logistic_regression': 'Logistic Regression',
+            'svm': 'SVM (Support Vector Machine)',
+            'random_forest': 'Random Forest'
+        }[x]
+    )
+    
+    # Informations sur le modèle
+    model_info = {
+        'naive_bayes': "Algorithme probabiliste, très rapide et efficace pour la classification de texte",
+        'logistic_regression': "Algorithme linéaire, bon équilibre entre performance et vitesse",
+        'svm': "Algorithme puissant mais plus lent, excellent pour les données haute dimension",
+        'random_forest': "Ensemble d'arbres de décision, robuste mais peut être lent"
+    }
+    
+    st.info(f"ℹ️ {model_info[model_type]}")
+    
+    st.markdown("---")
+    
+    # Bouton d'entraînement
+    if st.button("🚀 Entraîner le modèle", type="primary", use_container_width=True):
+        st.session_state.preprocess_method = preprocess_method
+        st.session_state.vectorizer_type = vectorizer_type
+        st.session_state.model_type = model_type
+        
+        with st.spinner("Entraînement en cours... Cela peut prendre quelques secondes"):
+            progress_bar = st.progress(0)
+            
+            # Simuler les étapes d'entraînement
+            progress_bar.progress(20)
+            time.sleep(0.3)
+            
+            model, vectorizer = train_model(
+                st.session_state.df,
+                preprocess_method,
+                vectorizer_type,
+                model_type
+            )
+            
+            progress_bar.progress(80)
+            time.sleep(0.3)
+            
+            st.session_state.model = model
+            st.session_state.vectorizer = vectorizer
+            
+            progress_bar.progress(100)
+            
+        st.success("✅
